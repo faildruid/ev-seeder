@@ -1,0 +1,23 @@
+{
+  "display_name": "Work Mail",
+  "real_name": "Alice Example",
+  "email": "alice@example.com",
+
+  "imap": {
+    "host": "imap.example.com",
+    "port": 993,
+    "security": "ssl-on-alternate-port",  // "tls" | "ssl-on-alternate-port" | "none"
+    "auth_method": "none",                 // "none" | "plain/password" | etc.
+    "username": "alice"
+  },
+
+  "smtp": {
+    "host": "smtp.example.com",
+    "port": 465,
+    "security": "ssl-on-alternate-port",  // "tls" | "ssl-on-alternate-port" | "none"
+    "auth_method": "PLAIN",               // "PLAIN" | "none" | "plain/password"
+    "username": "alice"
+  },
+
+  "check_interval_minutes": 10            // optional, defaults to 10
+}
