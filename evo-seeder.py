@@ -6,14 +6,14 @@ import uuid
 from pathlib import Path
 from textwrap import dedent
 
+SSL_METHOD = "ssl-on-alternate-port"  # Evolution's value for "SSL" (implicit TLS)
+
 def resolve_sources_dir():
     # Prefer Flatpak Evolution config if present; otherwise XDG config
-    # Flatpak path (host): ~/.var/app/org.gnome.Evolution/config/evolution/sources
     flatpak_dir = Path.home() / ".var/app/org.gnome.Evolution/config/evolution/sources"
     if flatpak_dir.exists():
         flatpak_dir.mkdir(parents=True, exist_ok=True)
         return flatpak_dir
-
     xdg = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
     sources_dir = Path(xdg) / "evolution/sources"
     sources_dir.mkdir(parents=True, exist_ok=True)
@@ -23,8 +23,18 @@ def write(path: Path, content: str):
     path.write_text(content, encoding="utf-8")
     print(f"Wrote {path}")
 
+def force_ssl(cfg: dict) -> dict:
+    """Ensure both IMAP & SMTP use SSL regardless of input."""
+    cfg = dict(cfg)  # shallow copy
+    imap = dict(cfg.get("imap", {}))
+    smtp = dict(cfg.get("smtp", {}))
+    imap["security"] = SSL_METHOD
+    smtp["security"] = SSL_METHOD
+    cfg["imap"] = imap
+    cfg["smtp"] = smtp
+    return cfg
+
 def build_account_source(uid_acc, uid_id, display_name, imap, check_interval):
-    # [Mail Account] file (incoming / IMAP)
     return dedent(f"""
     [Data Source]
     DisplayName={display_name}
@@ -37,10 +47,11 @@ def build_account_source(uid_acc, uid_id, display_name, imap, check_interval):
 
     [Authentication]
     Host={imap['host']}
-    Port={imap['port']}
+    Port={imap.get('port', 993)}
     User={imap.get('username', '')}
-    Method={imap.get('auth_method','none')}
+    Method={imap.get('auth_method', 'none')}
     ProxyUid=system-proxy
+    
 
     [Message Disposition Notifications]
     ResponsePolicy=never
@@ -53,7 +64,7 @@ def build_account_source(uid_acc, uid_id, display_name, imap, check_interval):
     IntervalMinutes={int(check_interval)}
 
     [Security]
-    Method={imap.get('security','ssl-on-alternate-port')}
+    Method={imap.get('security', SSL_METHOD)}
 
     [Imapx Backend]
     CheckAll=true
@@ -98,56 +109,71 @@ def build_transport_source(uid_tx, uid_acc, smtp, display_name):
 
     [Authentication]
     Host={smtp['host']}
-    Method={smtp.get('auth_method','PLAIN')}
-    Port={smtp['port']}
-    User={smtp.get('username','')}
+    Method={smtp.get('auth_method', 'PLAIN')}
+    Port={smtp.get('port', 465)}
+    User={smtp.get('username', '')}
     ProxyUid=system-proxy
 
     [Security]
-    Method={smtp.get('security','ssl-on-alternate-port')}
+    Method={smtp.get('security', SSL_METHOD)}
     """).strip() + "\n"
+
+def add_account(sources_dir: Path, cfg: dict):
+    cfg = force_ssl(cfg)  # enforce SSL
+    display_name = cfg.get("display_name", cfg.get("email", "Mail Account"))
+    real_name = cfg.get("real_name", cfg.get("email", ""))
+    email = cfg["email"]
+    imap = cfg["imap"]
+    smtp = cfg["smtp"]
+    check_interval = cfg.get("check_interval_minutes", 10)
+
+    # Generate UIDs
+    uid_acc = f"acc-{uuid.uuid4().hex[:8]}"
+    uid_id  = f"id-{uuid.uuid4().hex[:8]}"
+    uid_tx  = f"tx-{uuid.uuid4().hex[:8]}"
+
+    # Paths
+    acc_path = sources_dir / f"{uid_acc}.source"
+    id_path  = sources_dir / f"{uid_id}.source"
+    tx_path  = sources_dir / f"{uid_tx}.source"
+
+    # Contents
+    acc_content = build_account_source(uid_acc, uid_id, display_name, imap, check_interval)
+    id_content  = build_identity_source(uid_id, uid_acc, uid_tx, real_name, email)
+    tx_content  = build_transport_source(uid_tx, uid_acc, smtp, display_name)
+
+    # Write
+    write(acc_path, acc_content)
+    write(id_path, id_content)
+    write(tx_path, tx_content)
 
 def main():
     if len(sys.argv) != 2:
-        print("Usage: evo_add_account.py <account.json>", file=sys.stderr)
+        print("Usage: evo_add_accounts.py <accounts.json>", file=sys.stderr)
         sys.exit(1)
 
     cfg_path = Path(sys.argv[1])
     data = json.loads(cfg_path.read_text(encoding="utf-8"))
 
-    display_name = data.get("display_name", data.get("email", "Mail Account"))
-    real_name = data.get("real_name", data.get("email", ""))
-    email = data["email"]
-    imap = data["imap"]
-    smtp = data["smtp"]
-    check_interval = data.get("check_interval_minutes", 10)
-
     sources_dir = resolve_sources_dir()
 
-    # Generate UIDs (file basenames without .source)
-    uid_acc = f"acc-{uuid.uuid4().hex[:8]}"
-    uid_id  = f"id-{uuid.uuid4().hex[:8]}"
-    uid_tx  = f"tx-{uuid.uuid4().hex[:8]}"
+    # Accept a single object or a list
+    accounts = data if isinstance(data, list) else [data]
 
-    # Prepare file paths
-    acc_path = sources_dir / f"{uid_acc}.source"
-    id_path  = sources_dir / f"{uid_id}.source"
-    tx_path  = sources_dir / f"{uid_tx}.source"
+    for idx, cfg in enumerate(accounts, 1):
+        print(f"\n=== Adding account {idx} of {len(accounts)}: {cfg.get('email','(no email)')} ===")
+        required = ("email", "imap", "smtp")
+        missing = [k for k in required if k not in cfg]
+        if missing:
+            print(f"  Skipped: missing required fields: {', '.join(missing)}", file=sys.stderr)
+            continue
+        add_account(sources_dir, cfg)
 
-    # Build contents
-    acc_content = build_account_source(uid_acc, uid_id, display_name, imap, check_interval)
-    id_content  = build_identity_source(uid_id, uid_acc, uid_tx, real_name, email)
-    tx_content  = build_transport_source(uid_tx, uid_acc, smtp, display_name)
-
-    # Write files
-    write(acc_path, acc_content)
-    write(id_path, id_content)
-    write(tx_path, tx_content)
-
-    print("\nDone. If Evolution is running, restart it with:")
+    print("\nAll done.")
+    print("If Evolution is running, restart it:")
     print("  evolution --force-shutdown && evolution")
     print("\nNote: Passwords are stored via GNOME Keyring;")
-    print("you may be prompted for them on first connect.")
+    print("you may be prompted on first connect.")
 
 if __name__ == "__main__":
     main()
